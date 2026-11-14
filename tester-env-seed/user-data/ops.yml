@@ -1,0 +1,67 @@
+---
+# Local sub-page of the tester-env seed (referenced from conf.yml `pages:`).
+# Sub-pages live directly inside /app/user-data as plain YAML files.
+#
+# Same determinism rules as conf.yml: local emoji / bundled simple-icons only,
+# `.example` URLs, no status checks or widgets.
+pageInfo:
+  title: Operations
+  description: On-call and incident resources
+
+sections:
+  - name: On-Call
+    icon: 📟
+    items:
+      - title: Runbook
+        description: Step-by-step incident procedures
+        url: https://docs.northwind.example/runbook
+        icon: 📘
+        tags:
+          - ops
+      - title: Escalation Policy
+        description: Who to page and when
+        url: https://docs.northwind.example/escalation
+        icon: 🚨
+        tags:
+          - ops
+          - policy
+      - title: Incident Board
+        description: Open and recent incidents
+        url: https://incidents.northwind.example
+        icon: 🗂️
+        tags:
+          - ops
+
+  - name: Infrastructure
+    icon: 🗄️
+    items:
+      - title: Kubernetes
+        description: Cluster overview and workloads
+        url: https://k8s.northwind.example
+        icon: si-kubernetes
+        provider: Kubernetes
+        tags:
+          - infra
+      - title: Backups
+        description: Backup jobs and last restore test
+        url: https://backups.northwind.example
+        icon: 💾
+        tags:
+          - infra
+      - title: Patch Schedule
+        description: Monthly patching window for production hosts
+        url: https://change.northwind.example/patching
+        icon: 🗓️
+        tags:
+          - infra
+          - change
+      - title: Production Access
+        description: Elevated credentials for live systems
+        url: https://access.northwind.example/production
+        icon: 🔑
+        tags:
+          - infra
+          - security
+        displayData:
+          hideForUsers:
+            - viewer

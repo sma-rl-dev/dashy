@@ -2,6 +2,9 @@
 node_modules
 /dist
 
+# tester-env deployment state (bind-mounted /app/user-data)
+.tester-env-data*
+
 # Dashy config backups
 user-data/config-backups/
 

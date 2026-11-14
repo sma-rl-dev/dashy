@@ -1,0 +1,192 @@
+---
+# Deterministic tester-env seed for Dashy.
+#
+# This file is the pristine baseline: `./tester-env reset` restores it into the
+# bind-mounted /app/user-data directory, and `./tester-env seed` re-applies it
+# after a running instance has been edited through the UI.
+#
+# Determinism rules baked in here:
+#   - no update checks, error reporting, service worker, status/ping checks or
+#     background network calls (all of those egress);
+#   - every icon is either an emoji glyph or a bundled simple-icons slug, never
+#     a favicon/generative CDN or the FontAwesome kit;
+#   - config backups are disabled through DISABLE_CONFIG_BACKUPS=true in the
+#     compose service, so `Write to Disk` leaves no timestamped files behind;
+#   - all URLs use the reserved `.example` TLD, so a stray click can never reach
+#     a real service;
+#   - no widgets, RSS feeds, cloud backup or remote sub-pages (all egress).
+#
+# The data is a small internal service directory for a fictional company
+# ("Northwind IT"), with four home sections and one local sub-page (ops.yml).
+# See tester-env-seed.json for the stable requirement ids and exact counts.
+pageInfo:
+  title: Northwind Ops
+  description: Internal service directory
+  footer: Northwind IT - internal use only
+
+pages:
+  - name: Operations
+    path: ops.yml
+
+appConfig:
+  theme: nord
+  layout: auto
+  iconSize: medium
+  defaultIcon: 📁
+  faviconApi: local
+  disableUpdateChecks: true
+  enableErrorReporting: false
+  enableServiceWorker: false
+  statusCheck: false
+  allowConfigEdit: true
+  preventWriteToDisk: false
+  preventLocalSave: false
+  auth:
+    users:
+      # admin / tester-admin-2026  |  viewer / tester-viewer-2026
+      - user: admin
+        hash: 3C2D7B2DEB88092446A3A0061DFCCE34B0C4E60430ABB6C2A1FF0EAE242DA5C4
+        type: admin
+      - user: viewer
+        hash: 6399B175CD5C29D89ACA91EDDEA5B325713ECA1FAC0097D104F5481F58511E21
+        type: normal
+
+sections:
+  - name: Core Services
+    icon: 🖥️
+    displayData:
+      cols: 2
+      itemSize: medium
+    items:
+      - title: Service Desk
+        description: Raise and track IT support tickets
+        url: https://support.northwind.example
+        icon: 🎫
+        provider: Northwind IT
+        tags:
+          - support
+          - it
+        alias: helpdesk
+      - title: Monitoring
+        description: Dashboards and alert history
+        url: https://grafana.northwind.example
+        icon: si-grafana
+        provider: Grafana
+        tags:
+          - ops
+          - alerts
+      - title: Deployments
+        description: Build and release pipelines
+        url: https://ci.northwind.example
+        icon: si-github
+        provider: GitHub
+        tags:
+          - ops
+          - ci
+      - title: Status Page
+        description: Live availability for customer-facing services
+        url: https://status.northwind.example
+        icon: 📈
+        provider: Northwind Statuspage
+        tags:
+          - ops
+          - alerts
+      - title: Incident Communications and Customer Status Update Portal
+        description: Customer-facing updates during major incidents
+        url: https://comms.northwind.example/incidents
+        icon: 📣
+        tags:
+          - ops
+          - comms
+
+  - name: Facilities
+    icon: 🏢
+    displayData:
+      cols: 1
+    items:
+      - title: Room Booking
+        description: Book meeting rooms and desks
+        url: https://rooms.northwind.example
+        icon: 📅
+        tags:
+          - facilities
+      - title: IT Requests
+        description: Request hardware and access
+        url: https://requests.northwind.example
+        icon: 📦
+        tags:
+          - it
+          - requests
+        subItems:
+          - title: New laptop
+            url: https://requests.northwind.example/new-laptop
+            icon: 💻
+          - title: VPN access
+            url: https://requests.northwind.example/vpn
+            icon: 🔐
+          - title: Software licence
+            url: https://requests.northwind.example/licence
+            icon: 📄
+      - title: Visitor Management
+        description: Register guests and issue day passes
+        url: https://visitors.northwind.example
+        icon: 🪪
+        tags:
+          - facilities
+          - security
+
+  - name: People & Access
+    icon: 👥
+    displayData:
+      cols: 1
+    items:
+      - title: Directory
+        description: Staff directory and org chart
+        url: https://people.northwind.example
+        icon: 📇
+        tags:
+          - hr
+          - people
+      - title: Payroll
+        description: Payslips, expenses and benefits
+        url: https://payroll.northwind.example
+        icon: 💰
+        tags:
+          - hr
+          - finance
+      - title: Onboarding
+        description: First-week checklist for new starters
+        url: https://docs.northwind.example/onboarding
+        icon: 🧭
+        tags:
+          - hr
+          - docs
+        displayData:
+          hideForUsers:
+            - viewer
+
+  - name: Reference
+    icon: 📚
+    displayData:
+      collapsed: true
+    items:
+      - title: Style Guide
+        description: House style for internal documents
+        url: https://docs.northwind.example/style
+        icon: 📐
+        tags:
+          - docs
+      - title: API Standards
+        description: REST and event naming conventions
+        url: https://docs.northwind.example/api-standards
+        icon: 🧩
+        tags:
+          - docs
+          - engineering
+      - title: Design Assets
+        description: Logos, type scale and icon set
+        url: https://docs.northwind.example/design-assets
+        icon: 🎨
+        tags:
+          - docs
+          - design

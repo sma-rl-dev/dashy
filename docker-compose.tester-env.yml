@@ -1,0 +1,49 @@
+# tester-env compose stack for Dashy (single service, built from this checkout).
+#
+# The `tester-env` CLI is the supported entry point: it supplies IMAGE_TAG,
+# PORT, CONTAINER_NAME, COMPOSE_PROJECT_NAME, DASHY_UID/DASHY_GID and the
+# bind-mount path, and it creates/seeds the user-data directory before the
+# container starts. Direct `docker compose -f docker-compose.tester-env.yml up`
+# also works with the defaults below on port 8112.
+#
+# This file is standalone on purpose: upstream's docker-compose.yml pins the
+# prebuilt lissy93/dashy image, and merging an overlay into it would leave two
+# port mappings and a `restart: unless-stopped` policy. Everything the app needs
+# from upstream's file is restated here.
+name: ${COMPOSE_PROJECT_NAME:-tester-env-dashy}
+
+services:
+  dashy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VERSION: ${DASHY_VERSION:-4.9.18}
+    image: ${IMAGE_TAG:-tester-env-dashy:dev}
+    container_name: ${CONTAINER_NAME:-tester-env-dashy}
+    ports:
+      - "${PORT:-8112}:8080"
+    # Dashy's entire state is this directory: conf.yml plus optional sub-page
+    # YAML files and local assets. A bind mount (not a named volume) keeps seed
+    # and reset plain file operations and keeps the tree inspectable from the
+    # host. The CLI restores it from tester-env-seed/user-data.
+    volumes:
+      - ${DASHY_DATA_DIR:-./.tester-env-data}:/app/user-data
+    environment:
+      NODE_ENV: production
+      IS_DOCKER: "true"
+      PORT: "8080"
+      # Write to Disk writes a timestamped backup next to conf.yml unless this
+      # is set; those backups are web-served and would break reset determinism.
+      DISABLE_CONFIG_BACKUPS: ${DISABLE_CONFIG_BACKUPS:-true}
+    # Upstream's image runs as uid 1000. Default to the invoking user so a
+    # bind-mounted user-data tree stays writable for the visual config editor;
+    # the CLI exports the host uid/gid.
+    user: "${DASHY_UID:-1000}:${DASHY_GID:-1000}"
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "node", "/app/services/healthcheck.js"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s

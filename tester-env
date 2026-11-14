@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Dashy - Tester Environment CLI
+# Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+# Commands: deploy, seed, verify, reset, stop, logs, status, help
+#
+# Baseline: 4.9.18 (fc204e45fae4b0857cdaace68142d4f9f4a3ccd6)
+
+RUN_ID="${RUN_ID:-default}"
+PORT="${PORT:-8112}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="${SCRIPT_DIR}/docker-compose.tester-env.yml"
+SEED_DIR="${SCRIPT_DIR}/tester-env-seed/user-data"
+SEED_CONF="${SEED_DIR}/conf.yml"
+SEED_OPS="${SEED_DIR}/ops.yml"
+
+# Deterministic credentials: SHA-256 hashes of these passwords are in the seed
+# conf.yml (appConfig.auth.users). Auth is client-side only (no
+# ENABLE_HTTP_AUTH), matching Dashy's default built-in auth mode.
+CREDENTIALS_ADMIN_USER="${DASHY_ADMIN_USER:-admin}"
+CREDENTIALS_ADMIN_PASSWORD="${DASHY_ADMIN_PASSWORD:-tester-admin-2026}"
+CREDENTIALS_VIEWER_USER="${DASHY_VIEWER_USER:-viewer}"
+CREDENTIALS_VIEWER_PASSWORD="${DASHY_VIEWER_PASSWORD:-tester-viewer-2026}"
+
+refresh_names() {
+    local suffix=""
+    if [[ "${RUN_ID}" != "default" ]]; then
+        suffix="-${RUN_ID}"
+    fi
+
+    CONTAINER_NAME="tester-env-dashy${suffix}"
+    # IMAGE_TAG is set by scripts/rl-env to a content-addressed tag so identical
+    # (baseline, patch-set) combos share an image. Manual invocations get :dev.
+    IMAGE_NAME="${IMAGE_TAG:-tester-env-dashy:dev}"
+    COMPOSE_PROJECT="${COMPOSE_PROJECT_NAME:-tester-env-dashy${suffix}}"
+    # Dashy keeps its whole state in /app/user-data. A host directory (not a
+    # named volume) makes seed/reset plain file copies and lets the visual
+    # config editor's "Write to Disk" be inspected from the host.
+    DATA_DIR="${DASHY_DATA_DIR:-${SCRIPT_DIR}/.tester-env-data${suffix}}"
+}
+
+compose() {
+    docker compose \
+        -p "${COMPOSE_PROJECT}" \
+        -f "${COMPOSE_FILE}" \
+        --project-directory "${SCRIPT_DIR}" \
+        "$@"
+}
+
+compose_env() {
+    COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT}" \
+    CONTAINER_NAME="${CONTAINER_NAME}" \
+    IMAGE_TAG="${IMAGE_NAME}" \
+    PORT="${PORT}" \
+    DASHY_DATA_DIR="${DATA_DIR}" \
+    DASHY_VERSION="${DASHY_VERSION:-4.9.18}" \
+    DASHY_UID="${DASHY_UID:-$(id -u)}" \
+    DASHY_GID="${DASHY_GID:-$(id -g)}" \
+    compose "$@"
+}
+
+require_seed_tree() {
+    if [[ ! -f "${SEED_CONF}" ]]; then
+        echo "Error: seed config not found at ${SEED_CONF}" >&2
+        echo "       The seed tree is deployment tooling: scenario.meta.json must list" >&2
+        echo '       "tester-env-seed" in deploy.copy_paths so scripts/rl-env copies it' >&2
+        echo "       into the run worktree." >&2
+        exit 1
+    fi
+}
+
+require_running() {
+    if ! compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        echo "Error: container ${CONTAINER_NAME} is not running. Run './tester-env deploy' first." >&2
+        exit 1
+    fi
+}
+
+assert_safe_data_dir() {
+    local resolved
+    resolved="$(mkdir -p "${DATA_DIR}" && cd "${DATA_DIR}" && pwd)"
+    case "${resolved}" in
+        ""|"/"|"${HOME}"|"${SCRIPT_DIR}")
+            echo "Error: refusing to use ${resolved} as the user-data directory." >&2
+            exit 1
+            ;;
+    esac
+}
+
+# Copies the pristine seed tree over the bind-mounted user-data directory.
+# Removes editor drift (renamed/added items, sub-page writes, config backups) so
+# the visible dashboard returns to the exact baseline byte for byte.
+#
+# Only the *contents* are replaced: deleting the directory itself while a
+# container holds it bind-mounted leaves that container pointing at a deleted
+# inode (an empty /app/user-data), so a running instance could never be reseeded.
+restore_seed_tree() {
+    require_seed_tree
+    assert_safe_data_dir
+    find "${DATA_DIR}" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+    cp -a "${SEED_DIR}/." "${DATA_DIR}/"
+}
+
+wait_for_health() {
+    local attempt
+    for attempt in $(seq 1 120); do
+        if curl -sf "http://localhost:${PORT}/healthz" 2>/dev/null | grep -q '"status":"ok"'; then
+            echo "==> App healthy after ${attempt}s"
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "Error: app did not become healthy at http://localhost:${PORT}/healthz" >&2
+    compose_env logs --tail 80 >&2 || true
+    exit 1
+}
+
+cmd_deploy() {
+    require_seed_tree
+    echo "==> Building image from source: ${IMAGE_NAME}..."
+    echo "    (cold build runs yarn install --frozen-lockfile + Vite build;"
+    echo "     dependency layers stay cached across source edits)"
+    compose_env build
+
+    echo "==> Preparing user-data directory: ${DATA_DIR}"
+    restore_seed_tree
+
+    echo "==> Starting ${CONTAINER_NAME} on port ${PORT}..."
+    compose_env up -d --no-build
+
+    wait_for_health
+    cmd_seed --quiet
+
+    echo "==> Deployment complete."
+    echo "    URL:   http://localhost:${PORT}/"
+    echo "    Login: ${CREDENTIALS_ADMIN_USER} / ${CREDENTIALS_ADMIN_PASSWORD} (admin)"
+    echo "           ${CREDENTIALS_VIEWER_USER} / ${CREDENTIALS_VIEWER_PASSWORD} (normal)"
+    echo "    Browser URL: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${PORT}}/"
+}
+
+cmd_seed() {
+    local quiet="${1:-}"
+    require_seed_tree
+    [[ "${quiet}" == "--quiet" ]] || echo "==> Restoring deterministic Dashy config..."
+
+    # conf.yml and sub-pages are read from disk on every page load, so no
+    # restart is needed after a reseed. restore_seed_tree also deletes editor
+    # drift (renamed/add items, written sub-pages, config backups).
+    restore_seed_tree
+
+    if compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        # The server serves user-data as static files, so the served bytes must
+        # equal the seed bytes exactly (not just contain the title).
+        if ! curl -sf "http://localhost:${PORT}/conf.yml" | cmp -s - "${SEED_CONF}"; then
+            echo "Error: /conf.yml is not serving the seeded config byte for byte." >&2
+            exit 1
+        fi
+        echo "    conf.yml + ops.yml restored; dashboard serves \"Northwind Ops\"."
+    else
+        echo "    conf.yml + ops.yml restored (container not running; start it with deploy)."
+    fi
+}
+
+# Server-side proof that the app is up and serving the seeded tree from the bind
+# mount, including the browser-visible "Write to Disk" path. No browser needed.
+cmd_verify() {
+    require_running
+    local base="http://localhost:${PORT}" failures=0
+
+    check() {
+        local label="$1"
+        shift
+        if "$@" >/dev/null 2>&1; then
+            echo "  ok   ${label}"
+        else
+            echo "  FAIL ${label}" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    # Fixed-line presence in a seed file (exact indentation from the fixture).
+    check_line() {
+        local label="$1" line="$2" file="$3"
+        if grep -Fxq -- "${line}" "${file}"; then
+            echo "  ok   ${label}"
+        else
+            echo "  FAIL ${label}" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    # Stable record counts asserted by the seed manifest (tester-env-seed.json).
+    check_count() {
+        local label="$1" pattern="$2" expected="$3" file="$4" actual
+        actual="$(grep -Ec -- "${pattern}" "${file}" || true)"
+        if [[ "${actual}" -eq "${expected}" ]]; then
+            echo "  ok   ${label}"
+        else
+            echo "  FAIL ${label} (expected ${expected}, found ${actual})" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    # Section entries share the `- name:` line shape with `pages:` entries, so
+    # count them only inside the top-level `sections:` block.
+    check_sections() {
+        local label="$1" expected="$2" file="$3" actual
+        actual="$(awk '/^sections:/{in_sections=1; next} in_sections && /^  - name:/{count++} END{print count+0}' "${file}")"
+        if [[ "${actual}" -eq "${expected}" ]]; then
+            echo "  ok   ${label}"
+        else
+            echo "  FAIL ${label} (expected ${expected}, found ${actual})" >&2
+            failures=$((failures + 1))
+        fi
+    }
+
+    echo "==> Verifying ${base}"
+
+    check "/healthz reports status ok" bash -c \
+        "curl -sf '${base}/healthz' | grep -q '\"status\":\"ok\"'"
+    check "/ serves the SPA shell" bash -c \
+        "curl -sf '${base}/' | grep -q 'id=\"app\"'"
+    check "/schema.json serves the config schema" bash -c \
+        "curl -sf '${base}/schema.json' | grep -q 'appConfig'"
+
+    # Static file serving: the bytes on disk are the bytes the browser gets, so
+    # this proves the running instance serves the pristine seed (and exposes any
+    # editor drift), not merely a config that happens to contain a title.
+    check "/conf.yml is byte-identical to the seed" bash -c \
+        "curl -sf '${base}/conf.yml' | cmp -s - '${SEED_CONF}'"
+    check "/ops.yml is byte-identical to the seed" bash -c \
+        "curl -sf '${base}/ops.yml' | cmp -s - '${SEED_OPS}'"
+
+    # Structural facts scenario seed checks rely on. Counts/names come from the
+    # static manifest, so a scenario author can read them without a browser.
+    check_sections "home has 4 sections" 4 "${SEED_CONF}"
+    check_count "home has 14 items" '^      - title:' 14 "${SEED_CONF}"
+    check_count "home has 3 sub-items" '^          - title:' 3 "${SEED_CONF}"
+    check_count "home has 2 built-in auth users" '^      - user:' 2 "${SEED_CONF}"
+    check_line "section Core Services present" "  - name: Core Services" "${SEED_CONF}"
+    check_line "section Facilities present" "  - name: Facilities" "${SEED_CONF}"
+    check_line "section People & Access present" "  - name: People & Access" "${SEED_CONF}"
+    check_line "section Reference present" "  - name: Reference" "${SEED_CONF}"
+    check_line "Reference is collapsed by default" "      collapsed: true" "${SEED_CONF}"
+    check_line "Service Desk keeps the helpdesk alias" "        alias: helpdesk" "${SEED_CONF}"
+    check_count "one home item is hidden from viewer" '^            - viewer' 1 "${SEED_CONF}"
+    check_sections "ops sub-page has 2 sections" 2 "${SEED_OPS}"
+    check_count "ops sub-page has 7 items" '^      - title:' 7 "${SEED_OPS}"
+    check_line "ops sub-page lists On-Call" "  - name: On-Call" "${SEED_OPS}"
+    check_line "ops sub-page lists Infrastructure" "  - name: Infrastructure" "${SEED_OPS}"
+    check_count "one ops item is hidden from viewer" '^            - viewer' 1 "${SEED_OPS}"
+
+    # Proves the container user can write the bind-mounted user-data tree (the
+    # "Write to Disk" path used by the visual editor), then restores the seed
+    # and proves the reset target is byte-for-byte deterministic again.
+    local save_response
+    save_response="$(
+        python3 - "${SEED_CONF}" <<'PY' | curl -sf -X POST "${base}/config-manager/save" \
+            -H 'Content-Type: application/json' --data-binary @- 2>/dev/null
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as handle:
+    print(json.dumps({'config': handle.read(), 'filename': 'conf.yml'}))
+PY
+    )" || true
+
+    if grep -q '"success":true' <<<"${save_response}"; then
+        echo "  ok   /config-manager/save writes conf.yml on disk"
+    else
+        echo "  FAIL /config-manager/save writes conf.yml on disk (${save_response:-no response})" >&2
+        failures=$((failures + 1))
+    fi
+
+    # The server rewrites the YAML (schema modeline, key order) on save, so the
+    # saved file is intentionally not byte-identical. Reseeding must remove that
+    # drift, and DISABLE_CONFIG_BACKUPS=true must leave no timestamped files.
+    restore_seed_tree
+    check "reseed restores the exact seed tree (no drift)" diff -r "${SEED_DIR}" "${DATA_DIR}"
+    check "served /conf.yml is the seed again after reseed" bash -c \
+        "curl -sf '${base}/conf.yml' | cmp -s - '${SEED_CONF}'"
+    if [[ -d "${DATA_DIR}/config-backups" ]]; then
+        echo "  FAIL config backups were written to ${DATA_DIR}/config-backups" >&2
+        failures=$((failures + 1))
+    else
+        echo "  ok   no config-backups directory (backups disabled)"
+    fi
+
+    if [[ "${failures}" -ne 0 ]]; then
+        echo "Error: ${failures} verification check(s) failed." >&2
+        exit 1
+    fi
+
+    echo "==> Verification passed."
+    echo "    Admin login:  ${CREDENTIALS_ADMIN_USER} / ${CREDENTIALS_ADMIN_PASSWORD}"
+    echo "    Normal login: ${CREDENTIALS_VIEWER_USER} / ${CREDENTIALS_VIEWER_PASSWORD}"
+}
+
+cmd_reset() {
+    echo "==> Resetting environment..."
+    compose_env down -v --remove-orphans --timeout 10 || true
+    restore_seed_tree
+    echo "==> Reset complete: container/network removed, user-data restored from tester-env-seed."
+    echo "    Image ${IMAGE_NAME} is kept (content-addressed tags are shared across runs)."
+    echo "    Note: browser localStorage/cookies are not touched by this command; start"
+    echo "    scenario runs from a clean browser profile if a previous run saved locally."
+}
+
+cmd_stop() {
+    echo "==> Stopping containers (user-data preserved)..."
+    compose_env stop --timeout 10
+}
+
+cmd_logs() {
+    compose_env logs -f --tail 100 "$@"
+}
+
+cmd_status() {
+    if compose_env ps --status running --format '{{.Name}}' 2>/dev/null | grep -qx "${CONTAINER_NAME}"; then
+        # Prefer the actual published mapping: a later invocation without
+        # --port would otherwise report the default while the run uses another.
+        local url_port published
+        url_port="${PORT}"
+        published=$(compose_env port dashy 8080 2>/dev/null | awk -F: 'NF {print $NF}' | tail -1)
+        [[ -n "${published}" ]] && url_port="${published}"
+        echo "Status: RUNNING"
+        echo "URL: http://localhost:${url_port}/"
+        echo "Browser URL: ${TESTER_ENV_BROWSER_ORIGIN:-http://host.docker.internal:${url_port}}/"
+        echo "Container: ${CONTAINER_NAME}"
+        echo "Compose project: ${COMPOSE_PROJECT}"
+        echo "Image: ${IMAGE_NAME}"
+        echo "User data: ${DATA_DIR}"
+        echo "Credentials: ${CREDENTIALS_ADMIN_USER} / ${CREDENTIALS_ADMIN_PASSWORD} (admin),"
+        echo "             ${CREDENTIALS_VIEWER_USER} / ${CREDENTIALS_VIEWER_PASSWORD} (normal)"
+    else
+        echo "Status: NOT RUNNING"
+        echo "Image: ${IMAGE_NAME}"
+        echo "User data: ${DATA_DIR}"
+    fi
+}
+
+cmd_help() {
+    cat <<'EOF'
+Dashy - Tester Environment CLI
+
+Usage: ./tester-env <command> [--run-id <id>] [--port <port>]
+
+Commands:
+  deploy    Build the image from source, restore the seed, start the app, wait for health
+  seed      Restore the deterministic conf.yml + sub-page tree (idempotent)
+  verify    Assert the app serves the seeded config and can write conf.yml on disk
+  reset     Remove the run's container/network and restore the pristine user-data tree
+  stop      Stop the container (user-data preserved)
+  logs      Tail container logs
+  status    Show container status, URL, user-data path and credentials
+  help      Show this help message
+
+Options:
+  --run-id <id>   Isolate compose project/container/data dir for parallel runs. Default: default
+  --port <port>   Host port for the UI (container port 8080). Default: 8112
+
+Typical workflow:
+  ./tester-env deploy    # Build, seed, start, verify health
+  ./tester-env seed      # Re-apply the deterministic config (idempotent)
+  ./tester-env verify    # Check served config + write-to-disk path
+  ./tester-env reset     # Clean slate for the next scenario run
+
+Seed data (tester-env-seed/user-data):
+  - conf.yml: "Northwind Ops" dashboard, theme nord, layout auto.
+  - 4 sections (14 items, 3 sub-items): Core Services (2 cols, 5 items incl.
+    the `helpdesk` alias and a long-title edge case), Facilities (1 col, an item
+    with 3 sub-items), People & Access (1 col, Onboarding hidden from `viewer`),
+    Reference (collapsed, 3 docs items).
+  - ops.yml: local sub-page "Operations" with 2 sections / 7 items
+    (On-Call: Runbook, Escalation Policy, Incident Board; Infrastructure:
+    Kubernetes, Backups, Patch Schedule, Production Access hidden from `viewer`).
+  - Built-in auth (client-side): admin / tester-admin-2026 (type: admin) and
+    viewer / tester-viewer-2026 (type: normal). Fixed SHA-256 hashes, no env vars.
+  - Deterministic by construction: update checks, error reporting, service
+    worker, status/ping checks, widgets and favicon/generative CDNs are all off;
+    icons are emoji or bundled simple-icons; all URLs use the reserved .example TLD.
+  - Stable requirement ids and counts: tester-env-seed.json (same directory as
+    this script); `verify` asserts those counts and the byte-identical serve.
+  - Config backups are disabled (DISABLE_CONFIG_BACKUPS=true), so "Write to
+    Disk" does not leave timestamped files inside the web-served directory.
+
+Deployment details:
+  - Baseline: 4.9.18 (fc204e45fae4b0857cdaace68142d4f9f4a3ccd6, latest stable tag,
+    equal to master at triage time).
+  - Upstream multi-stage Dockerfile is used unchanged: node:24-alpine, yarn
+    install layers before `COPY . .`, then a production-deps stage and a
+    non-root runtime (uid 1000, tini, PORT 8080, /healthz healthcheck).
+  - docker-compose.tester-env.yml is standalone (not merged with upstream's
+    file) and bind-mounts .tester-env-data into /app/user-data. The container
+    runs as the invoking uid/gid so the visual editor can write conf.yml.
+  - .dockerignore excludes .tester-env-data so UI edits never invalidate the
+    Vite build layer.
+
+Environment:
+  IMAGE_TAG         Content-addressed image tag exported by scripts/rl-env
+  RUN_ID            Run id exported by scripts/rl-env (scopes container + data dir)
+  PORT              Host port (scripts/rl-env passes --port)
+  DASHY_DATA_DIR    Override the user-data directory. Default: <checkout>/.tester-env-data
+  DASHY_UID/DASHY_GID  Container uid/gid. Default: the invoking user
+  DASHY_VERSION     Build label only. Default: 4.9.18
+  TESTER_ENV_BROWSER_ORIGIN  Browser-visible origin printed by deploy/status
+
+Caveats:
+  - Auth is client-side only (Dashy's default built-in auth): the login screen
+    gates the SPA, but server endpoints such as /config-manager/save are not
+    protected. Set ENABLE_HTTP_AUTH=true in the compose service for server-side
+    enforcement.
+  - Dashy also keeps a localStorage config layer ("Save" local mode). reset
+    restores files on disk; it cannot clear a browser profile, so start runs
+    from a clean browser if a previous run saved locally.
+  - The visual editor needs a logged-in admin to write to disk; `verify` proves
+    the endpoint and the bind-mount permissions, not the UI flow.
+  - First build is a full Vite build (~1-3 min cold on this host, cached
+    afterwards); source-only edits reuse the yarn install layers.
+EOF
+}
+
+main() {
+    local cmd="${1:-help}"
+    shift || true
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --run-id)
+                RUN_ID="${2:?--run-id requires a value}"
+                shift 2
+                ;;
+            --port)
+                PORT="${2:?--port requires a value}"
+                shift 2
+                ;;
+            --help|-h)
+                cmd_help
+                exit 0
+                ;;
+            *)
+                echo "Unknown option: $1" >&2
+                cmd_help
+                exit 1
+                ;;
+        esac
+    done
+
+    refresh_names
+
+    case "${cmd}" in
+        deploy) cmd_deploy ;;
+        seed) cmd_seed ;;
+        verify) cmd_verify ;;
+        reset) cmd_reset ;;
+        stop) cmd_stop ;;
+        logs) cmd_logs ;;
+        status) cmd_status ;;
+        help|--help|-h) cmd_help ;;
+        *)
+            echo "Unknown command: ${cmd}" >&2
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

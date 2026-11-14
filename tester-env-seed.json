@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "app": "dashy",
+  "requirements": {
+    "admin-login": {
+      "status": "present",
+      "evidence": "Fixed built-in user admin / tester-admin-2026 with SHA-256 hash in conf.yml appConfig.auth.users and type admin (can Write to Disk)."
+    },
+    "viewer-login": {
+      "status": "present",
+      "evidence": "Fixed built-in user viewer / tester-viewer-2026 with type normal, used by the role-visibility requirements."
+    },
+    "dashboard-sections": {
+      "status": "present",
+      "evidence": "Home has exactly 4 sections in order: Core Services (2 cols, medium items), Facilities (1 col), People & Access (1 col), Reference (collapsed: true, so its 3 items are hidden until the section is expanded)."
+    },
+    "dashboard-items": {
+      "status": "present",
+      "evidence": "Home has exactly 14 items: 5 in Core Services, 3 in Facilities, 3 in People & Access, 3 in Reference. Every title is stable business text (no test1/foo); item metadata includes description, provider and tags."
+    },
+    "item-metadata": {
+      "status": "present",
+      "evidence": "Monitoring names provider Grafana and description 'Dashboards and alert history'; Deployments names provider GitHub; items carry tags (ops, alerts, ci, it, hr, docs, facilities, ...) that are visible via the item tooltip/search."
+    },
+    "search-filter": {
+      "status": "present",
+      "evidence": "Deterministic single-result queries: 'grafana' matches only Monitoring (provider), 'helpdesk' matches only Service Desk (alias), 'vpn' matches only IT Requests (sub-item title), 'alert history' matches only Monitoring (description words). 'ops' matches exactly the 4 tagged Core Services items, 'hr' matches Directory, Payroll and Onboarding (2 of them for viewer)."
+    },
+    "alias-redirect": {
+      "status": "present",
+      "evidence": "Service Desk has alias 'helpdesk' and is the only item whose searchable text (title/provider/description/tags/url/alias) matches that term, so alias matching can be observed without depending on redirect timing."
+    },
+    "sub-items": {
+      "status": "present",
+      "evidence": "IT Requests has exactly 3 sub-items: New laptop, VPN access, Software licence, all visible as a nested group under the card and matched by search ('vpn')."
+    },
+    "role-visibility": {
+      "status": "present",
+      "evidence": "Onboarding (People & Access) and Production Access (Operations > Infrastructure) set displayData.hideForUsers: [viewer], so admin sees both while viewer sees 13 home items and 6 Operations items."
+    },
+    "sub-page-navigation": {
+      "status": "present",
+      "evidence": "conf.yml pages[] links the local sub-page Operations (ops.yml) with exactly 2 sections: On-Call (Runbook, Escalation Policy, Incident Board) and Infrastructure (Kubernetes, Backups, Patch Schedule, Production Access) = 7 items."
+    },
+    "collapsible-section": {
+      "status": "present",
+      "evidence": "Reference is seeded with displayData.collapsed: true; expanding it reveals Style Guide, API Standards and Design Assets."
+    },
+    "long-title-edge-case": {
+      "status": "present",
+      "evidence": "Core Services contains 'Incident Communications and Customer Status Update Portal' (55 chars), a realistic long item title that exercises card wrapping/truncation on the default grid."
+    },
+    "config-edit-persistence": {
+      "status": "present",
+      "evidence": "allowConfigEdit true, preventWriteToDisk false, preventLocalSave false, and the container runs as the invoking uid/gid on a writable bind mount, so admin edits of seeded items persist through Write to Disk + reload; verify() round-trips /config-manager/save."
+    },
+    "deterministic-reset": {
+      "status": "present",
+      "evidence": "State is only tester-env-seed/user-data/{conf.yml,ops.yml}; seed/reset restore those exact bytes (verify compares served /conf.yml and /ops.yml with cmp and diffs the tree), config backups are disabled, and every icon/URL is local (.example) with update/status/error-reporting/widget network paths off."
+    },
+    "service-status-indicators": {
+      "status": "absent",
+      "evidence": "Dashy status/ping indicators need HTTP requests to the item URLs, which would egress to real hosts and make the seed non-deterministic. appConfig.statusCheck stays false and no item sets statusCheck/pingCheckEnabled; scenarios must not assert status dots."
+    }
+  }
+}

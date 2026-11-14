@@ -7,6 +7,15 @@ dist
 .git
 .github
 
+# tester-env deployment state never belongs in the image, and the user-data
+# bind mount changes on every UI edit: leaving it in the context would
+# invalidate the `COPY . .` layer and force a full Vite rebuild each time.
+.tester-env-data*
+tester-env-seed
+docker-compose.tester-env.yml
+tester-env
+DEPLOY-SMA.md
+
 # The only things needed to build the Dockerfile are:
 # Depens: package.json, yarn.lock
 # Setup:  tsconfig.json, vite.config.mjs
